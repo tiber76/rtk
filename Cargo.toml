@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.34.3"
+version = "0.38.0"
 edition = "2021"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
@@ -10,6 +10,14 @@ repository = "https://github.com/rtk-ai/rtk"
 readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "rtk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rtk"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
