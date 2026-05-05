@@ -221,7 +221,7 @@ pub struct MonthStats {
 }
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
-type CommandStats = (String, usize, usize, f64, u64);
+pub type CommandStats = (String, usize, usize, f64, u64);
 
 /// Aggregated stats for a single LLM session (Claude Code, Gemini, Cursor, Copilot).
 ///
@@ -1005,6 +1005,32 @@ impl Tracker {
                 })
             },
         )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// By-command breakdown for a single LLM session, top 10 by tokens saved.
+    /// Mirrors the shape returned by `get_by_command` so the same renderer can
+    /// be reused for both the global view and the per-session view.
+    pub fn get_by_command_for_session(&self, session_id: &str) -> Result<Vec<CommandStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+             FROM commands
+             WHERE llm_session_id = ?1
+             GROUP BY rtk_cmd
+             ORDER BY SUM(saved_tokens) DESC
+             LIMIT 10",
+        )?;
+
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)? as u64,
+            ))
+        })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
