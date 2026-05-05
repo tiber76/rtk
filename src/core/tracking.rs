@@ -223,6 +223,24 @@ pub struct MonthStats {
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Aggregated stats for a single LLM session (Claude Code, Gemini, Cursor, Copilot).
+///
+/// Returned by `Tracker::get_last_sessions`. `started_at` and `ended_at` are
+/// the min/max command timestamps observed for that session — they bracket
+/// the activity window, not the SessionStart/SessionEnd hook events.
+#[derive(Debug, Serialize)]
+pub struct SessionStats {
+    pub llm_session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub commands: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub savings_pct: f64,
+    pub total_time_ms: u64,
+}
+
 impl Tracker {
     /// Create a new tracker instance.
     ///
@@ -308,6 +326,31 @@ impl Tracker {
             [],
         );
 
+        // Migration: add llm_session_id column (Claude Code / Gemini / Cursor / Copilot
+        // session UUID extracted from the hook payload). Idempotent via PRAGMA check —
+        // ALTER TABLE ADD COLUMN raises a hard error if the column already exists.
+        let llm_col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name = 'llm_session_id'",
+                [],
+                |row| {
+                    let n: i64 = row.get(0)?;
+                    Ok(n > 0)
+                },
+            )
+            .unwrap_or(false);
+        if !llm_col_exists {
+            let _ = conn.execute(
+                "ALTER TABLE commands ADD COLUMN llm_session_id TEXT DEFAULT NULL",
+                [],
+            );
+        }
+        // Index for session-scoped lookups (monitor-ccu joins on llm_session_id).
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_session_id ON commands(llm_session_id)",
+            [],
+        );
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
                 id INTEGER PRIMARY KEY,
@@ -347,7 +390,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                llm_session_id TEXT DEFAULT NULL
             )",
             [],
         )?;
@@ -414,20 +458,25 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+                                                          // Resolve LLM session id at INSERT time so every code path (timer.track,
+                                                          // track_passthrough, telemetry) gets the same treatment without threading
+                                                          // an extra argument. None means: no LLM context found — store NULL.
+        let llm_session_id = crate::session_id::resolve_llm_session_id(None);
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, llm_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
-                project_path, // added
+                project_path,
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                llm_session_id,
             ],
         )?;
 
@@ -956,6 +1005,52 @@ impl Tracker {
                 })
             },
         )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Aggregate the N most recent LLM sessions by last activity timestamp.
+    ///
+    /// Excludes rows with `llm_session_id IS NULL` (commands run outside an
+    /// LLM context, e.g. user-driven shell). Each entry sums per-session
+    /// counts and tokens and brackets the activity window.
+    pub fn get_last_sessions(&self, limit: usize) -> Result<Vec<SessionStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT llm_session_id,
+                    MIN(timestamp) AS started_at,
+                    MAX(timestamp) AS ended_at,
+                    COUNT(*)        AS cmds,
+                    COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(saved_tokens), 0)  AS saved_tokens,
+                    COALESCE(SUM(exec_time_ms), 0)  AS total_time_ms
+             FROM commands
+             WHERE llm_session_id IS NOT NULL AND llm_session_id <> ''
+             GROUP BY llm_session_id
+             ORDER BY ended_at DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let input_tokens: i64 = row.get(4)?;
+            let saved_tokens: i64 = row.get(6)?;
+            let savings_pct = if input_tokens > 0 {
+                (saved_tokens as f64 / input_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            Ok(SessionStats {
+                llm_session_id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+                commands: row.get::<_, i64>(3)? as usize,
+                input_tokens: input_tokens as usize,
+                output_tokens: row.get::<_, i64>(5)? as usize,
+                saved_tokens: saved_tokens as usize,
+                savings_pct,
+                total_time_ms: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }

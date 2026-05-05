@@ -33,6 +33,7 @@ flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
 automod = "1"
+sysinfo = { version = "0.30", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
