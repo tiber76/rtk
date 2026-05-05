@@ -427,6 +427,9 @@ enum Commands {
         /// Show all time breakdowns (daily + weekly + monthly)
         #[arg(short, long)]
         all: bool,
+        /// Show per-session breakdown for the N most recent LLM sessions
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "3")]
+        last_sessions: Option<usize>,
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
@@ -1863,6 +1866,7 @@ fn run_cli() -> Result<i32> {
             weekly,
             monthly,
             all,
+            last_sessions,
             format,
             failures,
             reset,
@@ -1878,6 +1882,7 @@ fn run_cli() -> Result<i32> {
                 weekly,
                 monthly,
                 all,
+                last_sessions,
                 &format,
                 failures,
                 reset,

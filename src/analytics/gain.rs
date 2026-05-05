@@ -5,7 +5,7 @@ use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{DateTime, Local};
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -22,6 +22,7 @@ pub fn run(
     weekly: bool,
     monthly: bool,
     all: bool,
+    last_sessions: Option<usize>,
     format: &str,
     failures: bool,
     reset: bool,
@@ -30,6 +31,10 @@ pub fn run(
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if let Some(n) = last_sessions {
+        return show_last_sessions(&tracker, n.max(1), format);
+    }
 
     if reset {
         if !yes && !confirm_reset()? {
@@ -738,6 +743,79 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Per-session breakdown for `rtk gain --last-sessions N`.
+///
+/// Shows the N most recent LLM sessions (rows where `llm_session_id IS NOT
+/// NULL`) ordered by last activity timestamp, with token savings, command
+/// counts and exec time. JSON output mirrors `SessionStats` for piping into
+/// monitor tools.
+fn show_last_sessions(tracker: &Tracker, limit: usize, format: &str) -> Result<()> {
+    let sessions = tracker
+        .get_last_sessions(limit)
+        .context("Failed to load per-session breakdown")?;
+
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&sessions)
+            .context("Failed to serialize per-session breakdown")?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    if sessions.is_empty() {
+        println!("No LLM-tagged sessions recorded yet.");
+        println!("Sessions are captured automatically when running rtk via the Claude Code hook,");
+        println!("or by passing --llm-session-id / RTK_LLM_SESSION_ID explicitly.");
+        return Ok(());
+    }
+
+    println!("{}", styled("RTK Token Savings (Last LLM Sessions)", true));
+    println!("{}", "═".repeat(60));
+    println!();
+
+    for (idx, s) in sessions.iter().enumerate() {
+        println!("{}", styled(&format!("Session {}", idx + 1), true));
+        let id_short = if s.llm_session_id.len() > 36 {
+            &s.llm_session_id[..36]
+        } else {
+            &s.llm_session_id
+        };
+        print_kpi("ID", id_short.to_string());
+        print_kpi("Window", format_session_window(&s.started_at, &s.ended_at));
+        print_kpi("Commands", s.commands.to_string());
+        print_kpi("Input tokens", format_tokens(s.input_tokens));
+        print_kpi("Output tokens", format_tokens(s.output_tokens));
+        print_kpi(
+            "Tokens saved",
+            format!("{} ({:.1}%)", format_tokens(s.saved_tokens), s.savings_pct),
+        );
+        print_kpi("Exec time", format_duration(s.total_time_ms));
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Format the activity window for display: "YYYY-MM-DD HH:MM → HH:MM" if same
+/// day, otherwise "YYYY-MM-DD HH:MM → YYYY-MM-DD HH:MM".
+fn format_session_window(started_at: &str, ended_at: &str) -> String {
+    fn parse(ts: &str) -> Option<DateTime<Local>> {
+        DateTime::parse_from_rfc3339(ts)
+            .ok()
+            .map(|dt| dt.with_timezone(&Local))
+    }
+    match (parse(started_at), parse(ended_at)) {
+        (Some(start), Some(end)) => {
+            let start_fmt = start.format("%Y-%m-%d %H:%M").to_string();
+            if start.date_naive() == end.date_naive() {
+                format!("{} → {}", start_fmt, end.format("%H:%M"))
+            } else {
+                format!("{} → {}", start_fmt, end.format("%Y-%m-%d %H:%M"))
+            }
+        }
+        _ => format!("{started_at} → {ended_at}"),
+    }
 }
 
 /// Prompt the user to confirm a destructive reset operation.

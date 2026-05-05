@@ -223,6 +223,24 @@ pub struct MonthStats {
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Aggregated stats for a single LLM session (Claude Code, Gemini, Cursor, Copilot).
+///
+/// Returned by `Tracker::get_last_sessions`. `started_at` and `ended_at` are
+/// the min/max command timestamps observed for that session — they bracket
+/// the activity window, not the SessionStart/SessionEnd hook events.
+#[derive(Debug, Serialize)]
+pub struct SessionStats {
+    pub llm_session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub commands: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub savings_pct: f64,
+    pub total_time_ms: u64,
+}
+
 impl Tracker {
     /// Create a new tracker instance.
     ///
@@ -987,6 +1005,52 @@ impl Tracker {
                 })
             },
         )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Aggregate the N most recent LLM sessions by last activity timestamp.
+    ///
+    /// Excludes rows with `llm_session_id IS NULL` (commands run outside an
+    /// LLM context, e.g. user-driven shell). Each entry sums per-session
+    /// counts and tokens and brackets the activity window.
+    pub fn get_last_sessions(&self, limit: usize) -> Result<Vec<SessionStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT llm_session_id,
+                    MIN(timestamp) AS started_at,
+                    MAX(timestamp) AS ended_at,
+                    COUNT(*)        AS cmds,
+                    COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(saved_tokens), 0)  AS saved_tokens,
+                    COALESCE(SUM(exec_time_ms), 0)  AS total_time_ms
+             FROM commands
+             WHERE llm_session_id IS NOT NULL AND llm_session_id <> ''
+             GROUP BY llm_session_id
+             ORDER BY ended_at DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let input_tokens: i64 = row.get(4)?;
+            let saved_tokens: i64 = row.get(6)?;
+            let savings_pct = if input_tokens > 0 {
+                (saved_tokens as f64 / input_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            Ok(SessionStats {
+                llm_session_id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+                commands: row.get::<_, i64>(3)? as usize,
+                input_tokens: input_tokens as usize,
+                output_tokens: row.get::<_, i64>(5)? as usize,
+                saved_tokens: saved_tokens as usize,
+                savings_pct,
+                total_time_ms: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
