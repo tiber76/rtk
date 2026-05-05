@@ -308,6 +308,31 @@ impl Tracker {
             [],
         );
 
+        // Migration: add llm_session_id column (Claude Code / Gemini / Cursor / Copilot
+        // session UUID extracted from the hook payload). Idempotent via PRAGMA check —
+        // ALTER TABLE ADD COLUMN raises a hard error if the column already exists.
+        let llm_col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name = 'llm_session_id'",
+                [],
+                |row| {
+                    let n: i64 = row.get(0)?;
+                    Ok(n > 0)
+                },
+            )
+            .unwrap_or(false);
+        if !llm_col_exists {
+            let _ = conn.execute(
+                "ALTER TABLE commands ADD COLUMN llm_session_id TEXT DEFAULT NULL",
+                [],
+            );
+        }
+        // Index for session-scoped lookups (monitor-ccu joins on llm_session_id).
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_session_id ON commands(llm_session_id)",
+            [],
+        );
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
                 id INTEGER PRIMARY KEY,
@@ -347,7 +372,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                llm_session_id TEXT DEFAULT NULL
             )",
             [],
         )?;
@@ -414,20 +440,25 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+                                                          // Resolve LLM session id at INSERT time so every code path (timer.track,
+                                                          // track_passthrough, telemetry) gets the same treatment without threading
+                                                          // an extra argument. None means: no LLM context found — store NULL.
+        let llm_session_id = crate::session_id::resolve_llm_session_id(None);
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, llm_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
-                project_path, // added
+                project_path,
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                llm_session_id,
             ],
         )?;
 

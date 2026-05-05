@@ -5,6 +5,7 @@ mod discover;
 mod hooks;
 mod learn;
 mod parser;
+mod session_id;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
@@ -68,6 +69,11 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// LLM session UUID to attach to the recorded command row.
+    /// Highest precedence; overrides RTK_LLM_SESSION_ID and the proctree fallback.
+    #[arg(long = "llm-session-id", global = true)]
+    llm_session_id: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -759,6 +765,11 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Persist the current LLM session id so child rtk invocations can recover it via proctree.
+    /// Reads a SessionStart-style JSON payload from stdin.
+    SessionStart,
+    /// Remove the active-session marker for the current host process.
+    SessionEnd,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1350,6 +1361,15 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Vector 1 → 2 bridge: when the user passes `--llm-session-id` explicitly,
+    // promote it to the env var so every downstream code path (including child
+    // tools we spawn) sees the same id without threading an extra argument.
+    if let Some(ref sid) = cli.llm_session_id {
+        if !sid.is_empty() {
+            std::env::set_var(session_id::ENV_LLM_SESSION_ID, sid);
+        }
+    }
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
@@ -2114,6 +2134,14 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::SessionStart => {
+                session_id::run_session_start()?;
+                0
+            }
+            HookCommands::SessionEnd => {
+                session_id::run_session_end()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

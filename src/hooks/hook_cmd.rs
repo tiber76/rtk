@@ -10,6 +10,17 @@ use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
 use crate::discover::registry::{has_heredoc, rewrite_command};
+use crate::session_id::{extract_session_id_from_payload, prefix_command_with_session_id};
+
+/// Wrap a rewritten command with `RTK_LLM_SESSION_ID=<uuid>` so the rtk
+/// invocation that the host runs records its row against the right session.
+/// Returns `rewritten` unchanged if the payload does not carry a session id.
+fn maybe_attach_session_id(rewritten: &str, payload: &Value) -> String {
+    match extract_session_id_from_payload(payload) {
+        Some(sid) => prefix_command_with_session_id(rewritten, &sid),
+        None => rewritten.to_string(),
+    }
+}
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -325,10 +336,14 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         }
     };
 
+    // Vector 3: scope RTK_LLM_SESSION_ID to the rewritten command so the rtk
+    // process the host spawns can persist its row against the same session.
+    let final_cmd = maybe_attach_session_id(&rewritten, v);
+
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
         if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
+            obj.insert("command".into(), Value::String(final_cmd.clone()));
         }
         ti
     };
@@ -348,7 +363,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
-        rewritten,
+        rewritten: final_cmd,
         output: json!({ "hookSpecificOutput": hook_output }),
     }
 }
