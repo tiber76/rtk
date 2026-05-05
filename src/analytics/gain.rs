@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{CommandStats, DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -153,88 +153,7 @@ pub fn run(
         }
 
         if !summary.by_command.is_empty() {
-            // added: styled section header
-            println!("{}", styled("By Command", true));
-
-            // added: dynamic column widths for clean alignment
-            let cmd_width = 24usize;
-            let impact_width = 10usize;
-            let count_width = summary
-                .by_command
-                .iter()
-                .map(|(_, count, _, _, _)| count.to_string().len())
-                .max()
-                .unwrap_or(5)
-                .max(5);
-            let saved_width = summary
-                .by_command
-                .iter()
-                .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
-                .max()
-                .unwrap_or(5)
-                .max(5);
-            let time_width = summary
-                .by_command
-                .iter()
-                .map(|(_, _, _, _, avg_time)| format_duration(*avg_time).len())
-                .max()
-                .unwrap_or(6)
-                .max(6);
-
-            let table_width = 3
-                + 2
-                + cmd_width
-                + 2
-                + count_width
-                + 2
-                + saved_width
-                + 2
-                + 6
-                + 2
-                + time_width
-                + 2
-                + impact_width;
-            println!("{}", "─".repeat(table_width));
-            println!(
-                "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
-                cmd_width = cmd_width, count_width = count_width,
-                saved_width = saved_width, time_width = time_width,
-                impact_width = impact_width
-            );
-            println!("{}", "─".repeat(table_width));
-
-            let max_saved = summary
-                .by_command
-                .iter()
-                .map(|(_, _, saved, _, _)| *saved)
-                .max()
-                .unwrap_or(1);
-
-            for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
-                let row_idx = format!("{:>2}.", idx + 1);
-                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
-                let count_cell = format!("{:>count_width$}", count, count_width = count_width);
-                let saved_cell = format!(
-                    "{:>saved_width$}",
-                    format_tokens(*saved),
-                    saved_width = saved_width
-                );
-                let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
-                let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
-                let time_cell = format!(
-                    "{:>time_width$}",
-                    format_duration(*avg_time),
-                    time_width = time_width
-                );
-                let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
-                println!(
-                    "{}  {}  {}  {}  {}  {}  {}",
-                    row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
-                );
-            }
-            println!("{}", "─".repeat(table_width));
-            println!();
+            print_by_command_table(&summary.by_command);
         }
 
         if graph && !summary.by_day.is_empty() {
@@ -745,6 +664,91 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     Ok(())
 }
 
+/// Render the shared "By Command" table used by both the global summary and
+/// the per-session breakdown. Columns: rank, command, count, saved tokens,
+/// avg savings %, avg exec time, mini impact bar. Top 10 by tokens saved.
+fn print_by_command_table(by_command: &[CommandStats]) {
+    if by_command.is_empty() {
+        return;
+    }
+    println!("{}", styled("By Command", true));
+
+    let cmd_width = 24usize;
+    let impact_width = 10usize;
+    let count_width = by_command
+        .iter()
+        .map(|(_, count, _, _, _)| count.to_string().len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let saved_width = by_command
+        .iter()
+        .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let time_width = by_command
+        .iter()
+        .map(|(_, _, _, _, avg_time)| format_duration(*avg_time).len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+
+    let table_width = 3
+        + 2
+        + cmd_width
+        + 2
+        + count_width
+        + 2
+        + saved_width
+        + 2
+        + 6
+        + 2
+        + time_width
+        + 2
+        + impact_width;
+    println!("{}", "─".repeat(table_width));
+    println!(
+        "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
+        "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
+        cmd_width = cmd_width, count_width = count_width,
+        saved_width = saved_width, time_width = time_width,
+        impact_width = impact_width
+    );
+    println!("{}", "─".repeat(table_width));
+
+    let max_saved = by_command
+        .iter()
+        .map(|(_, _, saved, _, _)| *saved)
+        .max()
+        .unwrap_or(1);
+
+    for (idx, (cmd, count, saved, pct, avg_time)) in by_command.iter().enumerate() {
+        let row_idx = format!("{:>2}.", idx + 1);
+        let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width));
+        let count_cell = format!("{:>count_width$}", count, count_width = count_width);
+        let saved_cell = format!(
+            "{:>saved_width$}",
+            format_tokens(*saved),
+            saved_width = saved_width
+        );
+        let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
+        let pct_cell = colorize_pct_cell(*pct, &pct_plain);
+        let time_cell = format!(
+            "{:>time_width$}",
+            format_duration(*avg_time),
+            time_width = time_width
+        );
+        let impact = mini_bar(*saved, max_saved, impact_width);
+        println!(
+            "{}  {}  {}  {}  {}  {}  {}",
+            row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
+        );
+    }
+    println!("{}", "─".repeat(table_width));
+    println!();
+}
+
 /// Per-session breakdown for `rtk gain --last-sessions N`.
 ///
 /// Shows the N most recent LLM sessions (rows where `llm_session_id IS NOT
@@ -792,6 +796,14 @@ fn show_last_sessions(tracker: &Tracker, limit: usize, format: &str) -> Result<(
         );
         print_kpi("Exec time", format_duration(s.total_time_ms));
         println!();
+
+        // Same per-command table as the global `rtk gain` view, scoped to
+        // this session's commands. Best-effort: a query failure for one
+        // session must not abort the whole listing.
+        match tracker.get_by_command_for_session(&s.llm_session_id) {
+            Ok(by_cmd) if !by_cmd.is_empty() => print_by_command_table(&by_cmd),
+            _ => {}
+        }
     }
 
     Ok(())
